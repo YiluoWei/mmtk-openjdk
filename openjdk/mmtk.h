@@ -9,18 +9,6 @@
 extern "C" {
 #endif
 
-#ifndef MMTK_GC_NOGC
-#define MMTK_GC_NOGC 0
-#endif
-
-#ifndef MMTK_GC_SEMISPACE
-#define MMTK_GC_SEMISPACE 0
-#endif
-
-#ifndef MMTK_GC_GENCOPY
-#define MMTK_GC_GENCOPY 0
-#endif
-
 typedef void* MMTk_Mutator;
 typedef void* MMTk_TraceLocal;
 
@@ -66,6 +54,7 @@ extern AllocatorSelector get_allocator_mapping(int allocator);
 /**
  * Misc
  */
+extern char* mmtk_active_barrier();
 extern void enable_collection(void *tls);
 extern void gc_init(size_t heap_size);
 extern bool will_never_move(void* object);
