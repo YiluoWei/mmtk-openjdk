@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 pub struct VMObjectModel {}
 
 impl ObjectModel<OpenJDK> for VMObjectModel {
-    const HAS_GC_BYTE: bool = true;
+    const HAS_GC_BYTE: bool = false;
 
     #[cfg(target_pointer_width = "64")]
     const GC_BYTE_OFFSET: isize = 7;
