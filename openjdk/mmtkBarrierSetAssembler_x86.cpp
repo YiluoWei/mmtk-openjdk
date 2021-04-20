@@ -31,6 +31,8 @@
 #include "utilities/macros.hpp"
 #include "mmtkMutator.hpp"
 
+#define SIDE_METADATA_BASE_ADDRESS 0x160000000000L
+
 #define __ masm->
 
 void MMTkBarrierSetAssembler::eden_allocate(MacroAssembler* masm, Register thread, Register obj, Register var_size_in_bytes, int con_size_in_bytes, Register t1, Label& slow_case) {
@@ -79,6 +81,33 @@ void MMTkBarrierSetAssembler::eden_allocate(MacroAssembler* masm, Register threa
     __ jcc(Assembler::above, slow_case);
     // lab.cursor = end
     __ movptr(cursor, end);
+
+    Register tmp3 = rscratch2;
+    Register tmp2 = rscratch1;
+    Register tmp4 = t1;
+    assert_different_registers(obj, tmp2, tmp3);
+
+    // tmp2 = load-byte (SIDE_METADATA_BASE_ADDRESS + (obj >> 6));
+    __ movptr(tmp3, obj);
+    __ shrptr(tmp3, 6);
+    __ movptr(tmp2, SIDE_METADATA_BASE_ADDRESS);
+    __ movb(tmp2, Address(tmp2, tmp3));
+    // // tmp3 = 1 << ((obj >> 3) & 7)
+    __ movptr(tmp4, obj);
+    __ shrptr(tmp4, 3);
+    __ andptr(tmp4, 7);
+    __ movptr(tmp3, 1);
+    __ shlptr(tmp3, 1);  // FIXME: should do shlptr(tmp3, tmp4)
+    // // tmp2 = tmp2 | tmp3
+    __ orptr(tmp2, tmp3);
+
+    // // store-byte tmp2 (SIDE_METADATA_BASE_ADDRESS + (obj >> 6))
+    __ movptr(tmp3, obj);
+    __ shrptr(tmp3, 6);
+    __ movptr(tmp4, SIDE_METADATA_BASE_ADDRESS);
+    __ movb(Address(tmp2, tmp3), tmp2);  // FIXME: should use CAS
+
+
     // BarrierSetAssembler::incr_allocated_bytes
     if (var_size_in_bytes->is_valid()) {
       __ addq(Address(r15_thread, in_bytes(JavaThread::allocated_bytes_offset())), var_size_in_bytes);

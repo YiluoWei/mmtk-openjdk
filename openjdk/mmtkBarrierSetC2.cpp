@@ -39,6 +39,7 @@
 #include "mmtk.h"
 #include "mmtkMutator.hpp"
 
+#define SIDE_METADATA_BASE_ADDRESS 0x0000060000000000L
 
 void MMTkBarrierSetC2::expand_allocate(
             PhaseMacroExpand* x,
@@ -174,6 +175,56 @@ void MMTkBarrierSetC2::expand_allocate(
     Node *old_eden_top = new LoadPNode(ctrl, contended_phi_rawmem, eden_top_adr, TypeRawPtr::BOTTOM, TypeRawPtr::BOTTOM, MemNode::unordered);
 
     x->transform_later(old_eden_top);
+
+    Node *obj_addr = new CastP2XNode(ctrl, old_eden_top);
+    x->transform_later(obj_addr);
+
+    Node *addr_shift = ConINode::make(6);
+    x->transform_later(addr_shift);
+
+    Node *meta_offset = new URShiftLNode(obj_addr, addr_shift);
+    x->transform_later(meta_offset);
+
+    Node *meta_base = ConLNode::make(SIDE_METADATA_BASE_ADDRESS);
+    x->transform_later(meta_base);
+
+    Node *meta_addr = new AddLNode(meta_base, meta_offset);
+    x->transform_later(meta_addr);
+
+    Node *meta_addr_p = new CastX2PNode(meta_addr);
+    x->transform_later(meta_addr_p);
+
+    Node *meta_val = new LoadUBNode(ctrl, contended_phi_rawmem, meta_addr_p, TypePtr::BOTTOM, TypeInt::BYTE, MemNode::unordered);
+    x->transform_later(meta_val);
+
+    Node *meta_val_shift = ConINode::make(3);
+    x->transform_later(meta_val_shift);
+
+    Node *shifted_addr = new URShiftLNode(obj_addr, meta_val_shift);
+    x->transform_later(shifted_addr);
+
+    Node *meta_val_mask = ConLNode::make(0b111);
+    x->transform_later(meta_val_mask);
+
+    Node *shifted_masked_addr = new AndLNode(shifted_addr, meta_val_mask);
+    x->transform_later(shifted_masked_addr);
+
+    Node *const_one =  ConINode::make(1);
+    x->transform_later(const_one);
+
+    Node *shifted_masked_addr_i = new CastIINode(shifted_masked_addr, TypeInt::INT);
+    x->transform_later(shifted_masked_addr_i);
+
+    Node *set_bit = new LShiftINode(const_one, shifted_masked_addr_i);
+    x->transform_later(set_bit);
+
+    Node *new_meta_val = new OrINode(meta_val, set_bit);
+    x->transform_later(new_meta_val);
+
+    // FIXME: should use loop-CAS instead of store 
+    Node *set_alloc_bit = new StoreBNode(ctrl, contended_phi_rawmem, meta_addr_p, TypeRawPtr::BOTTOM, new_meta_val, MemNode::unordered);
+    x->transform_later(set_alloc_bit);
+
     // Add to heap top to get a new heap top
     Node *new_eden_top = new AddPNode(x->top(), old_eden_top, size_in_bytes);
     x->transform_later(new_eden_top);
