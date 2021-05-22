@@ -7,16 +7,41 @@ void MMTkObjectBarrierSetRuntime::record_modified_node_slow(void* obj) {
 
 void MMTkObjectBarrierSetRuntime::record_modified_node(oop src) {
 #if MMTK_ENABLE_OBJECT_BARRIER_FASTPATH
-    intptr_t addr = (intptr_t) (void*) src;
-    intptr_t meta_chunk_addr = SIDE_METADATA_BASE_ADDRESS + ((addr & ~CHUNK_MASK) >> SIDE_METADATA_WORST_CASE_RATIO_LOG);
-    intptr_t internal_addr = addr & CHUNK_MASK;
-    intptr_t second_offset = internal_addr >> 6;
-    uint8_t* meta_addr = (uint8_t*) (meta_chunk_addr + second_offset);
-    intptr_t shift = (addr >> 3) & 0b111;
-    uint8_t byte_val = *meta_addr;
-    if (((byte_val >> shift) & 1) == 1) {
+    // intptr_t addr = (intptr_t) (void*) src;
+    // intptr_t meta_chunk_addr = SIDE_METADATA_BASE_ADDRESS + ((addr & ~CHUNK_MASK) >> SIDE_METADATA_WORST_CASE_RATIO_LOG);
+    // intptr_t internal_addr = addr & CHUNK_MASK;
+    // intptr_t second_offset = internal_addr >> 6;
+    // uint8_t* meta_addr = (uint8_t*) (meta_chunk_addr + second_offset);
+    // intptr_t shift = (addr >> 3) & 0b111;
+    // uint8_t byte_val = *meta_addr;
+    // if (((byte_val >> shift) & 1) == 1) {
+    //   record_modified_node_slow((void*) src);
+    // }
+    // uint8_t* meta_addr = (uint8_t*) (void*) src;
+    // uint8_t byte_val = *meta_addr;
+    // if (byte_val != 1) {
+    //   record_modified_node_slow((void*) src);
+    // }
+    
+    uintptr_t* meta_addr = (uintptr_t*) (void*) src;
+    uintptr_t header_val = *meta_addr;
+    uintptr_t log_byte = header_val & 0xff;
+    if (log_byte == 1) {
+      return;
+    }
+    uintptr_t lock_pattern = log_byte & 0b11;
+    if (lock_pattern == 1) {
+      record_modified_node_slow((void*) src);
+    } else if (lock_pattern == 0b00 || lock_pattern == 0b10) {
+      uint8_t* real_addr = (uint8_t*) (void*) (header_val ^ lock_pattern);
+      uint8_t real_byte = *real_addr;
+      if (real_byte != 1) {
+        record_modified_node_slow((void*) src);
+      }
+    } else {
       record_modified_node_slow((void*) src);
     }
+
 #else
     record_modified_node_slow((void*) src);
 #endif
@@ -42,6 +67,7 @@ void MMTkObjectBarrierSetAssembler::oop_store_at(MacroAssembler* masm, Decorator
 void MMTkObjectBarrierSetAssembler::record_modified_node(MacroAssembler* masm, Register obj, Register tmp1, Register tmp2) {
 #if MMTK_ENABLE_OBJECT_BARRIER_FASTPATH
   Label done;
+  Label do_slow;
 
   Register tmp3 = rscratch1;
   Register tmp4 = rscratch2;
@@ -49,37 +75,52 @@ void MMTkObjectBarrierSetAssembler::record_modified_node(MacroAssembler* masm, R
   assert_different_registers(tmp4, rcx);
 
   // tmp3 = SIDE_METADATA_BASE_ADDRESS + ((addr & ~CHUNK_MASK) >> SIDE_METADATA_WORST_CASE_RATIO_LOG);
-  __ movptr(tmp3, obj);
-  __ movptr(tmp2, ~CHUNK_MASK);
-  __ andptr(tmp3, tmp2);
-  __ shrptr(tmp3, SIDE_METADATA_WORST_CASE_RATIO_LOG);
-  __ movptr(tmp2, SIDE_METADATA_BASE_ADDRESS);
-  __ addptr(tmp3, tmp2);
-  // tmp2 = * (uint8_t*) (((obj & CHUNK_MASK) >> 6) + tmp3)
-  __ movptr(tmp2, obj);
-  __ andptr(tmp2, CHUNK_MASK);
-  __ shrptr(tmp2, 6);
-  __ movb(tmp2, Address(tmp3, tmp2));
-  // tmp3 = (obj >> 3) & 7
-  __ movptr(tmp4, tmp3);
-  __ movptr(tmp3, obj);
-  __ shrptr(tmp3, 3);
-  __ andptr(tmp3, 7);
-  // tmp2 = tmp2 >> tmp3
-  __ movptr(tmp4, rcx);
-  __ movl(rcx, tmp3);
-  __ shrptr(tmp2);
-  __ movptr(rcx, tmp4);
-  // if ((tmp2 & 1) == 1) goto slowpath;
-  __ andptr(tmp2, 1);
-  __ cmpptr(tmp2, 1);
-  __ jcc(Assembler::notEqual, done);
+  // __ movptr(tmp3, obj);
+  // __ movptr(tmp2, ~CHUNK_MASK);
+  // __ andptr(tmp3, tmp2);
+  // __ shrptr(tmp3, SIDE_METADATA_WORST_CASE_RATIO_LOG);
+  // __ movptr(tmp2, SIDE_METADATA_BASE_ADDRESS);
+  // __ addptr(tmp3, tmp2);
+  // // tmp2 = * (uint8_t*) (((obj & CHUNK_MASK) >> 6) + tmp3)
+  // __ movptr(tmp2, obj);
+  // __ andptr(tmp2, CHUNK_MASK);
+  // __ shrptr(tmp2, 6);
+  // __ movb(tmp2, Address(tmp3, tmp2));
+  // // tmp3 = (obj >> 3) & 7
+  // __ movptr(tmp4, tmp3);
+  // __ movptr(tmp3, obj);
+  // __ shrptr(tmp3, 3);
+  // __ andptr(tmp3, 7);
+  // // tmp2 = tmp2 >> tmp3
+  // __ movptr(tmp4, rcx);
+  // __ movl(rcx, tmp3);
+  // __ shrptr(tmp2);
+  // __ movptr(rcx, tmp4);
+  // // if ((tmp2 & 1) == 1) goto slowpath;
+  // __ andptr(tmp2, 1);
+  // __ cmpptr(tmp2, 1);
+  // __ jcc(Assembler::notEqual, done);
+  
+  __ movb(tmp3, Address(obj, 0));
+  __ cmpptr(tmp3, 1);
+  __ jcc(Assembler::equal, done);
+  __ andptr(tmp3, 0b11);
+  __ cmpptr(tmp3, 1);
+  __ jcc(Assembler::equal, do_slow);
 
+  __ movptr(tmp4, Address(obj, 0));
+  __ xorptr(tmp4, tmp3);
+  __ movb(tmp3, Address(tmp4, 0));
+  __ cmpptr(tmp3, 1);
+  __ jcc(Assembler::equal, done);
+
+  __ bind(do_slow);
   assert_different_registers(c_rarg0, obj);
   __ movptr(c_rarg0, obj);
   __ call_VM_leaf_base(CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), 1);
 
   __ bind(done);
+  
 #else
   assert_different_registers(c_rarg0, obj);
   __ movptr(c_rarg0, obj);
@@ -132,37 +173,45 @@ void MMTkObjectBarrierSetC1::record_modified_node(LIRAccess& access, LIR_Opr src
   CodeStub* slow = new MMTkObjectBarrierStub(src, slot, new_val);
 
 #if MMTK_ENABLE_OBJECT_BARRIER_FASTPATH
-  LIR_Opr addr = src;
-  // intptr_t meta_chunk_addr = SIDE_METADATA_BASE_ADDRESS + ((addr & ~CHUNK_MASK) >> SIDE_METADATA_WORST_CASE_RATIO_LOG);
-  // uint8_t* meta_addr = (uint8_t*) (meta_chunk_addr + ((addr & CHUNK_MASK) >> 6));
-  LIR_Opr meta_chunk_addr = gen->new_pointer_register();
-  __ move(addr, meta_chunk_addr);
-  __ logical_and(meta_chunk_addr, LIR_OprFact::longConst(~CHUNK_MASK), meta_chunk_addr);
-  __ shift_right(meta_chunk_addr, SIDE_METADATA_WORST_CASE_RATIO_LOG, meta_chunk_addr);
-  __ add(meta_chunk_addr, LIR_OprFact::longConst(SIDE_METADATA_BASE_ADDRESS), meta_chunk_addr);
-  LIR_Opr offset = gen->new_pointer_register();
-  __ move(addr, offset);
-  __ logical_and(offset, LIR_OprFact::longConst(CHUNK_MASK), offset);
-  __ shift_right(offset, 6, offset);
-  LIR_Address* meta_addr = new LIR_Address(meta_chunk_addr, offset, T_BYTE);
-  // intptr_t shift = (addr >> 3) & 0b111;
-  LIR_Opr shift_long = gen->new_pointer_register();
-  __ move(addr, shift_long);
-  __ shift_right(shift_long, 3, shift_long);
-  __ logical_and(shift_long, LIR_OprFact::longConst(0b111), shift_long);
-  LIR_Opr shift_int = gen->new_register(T_INT);
-  __ convert(Bytecodes::_l2i, shift_long, shift_int);
-  LIR_Opr shift = LIRGenerator::shiftCountOpr();
-  __ move(shift_int, shift);
-  // uint8_t byte_val = *meta_addr;
+  // LIR_Opr addr = src;
+  // // intptr_t meta_chunk_addr = SIDE_METADATA_BASE_ADDRESS + ((addr & ~CHUNK_MASK) >> SIDE_METADATA_WORST_CASE_RATIO_LOG);
+  // // uint8_t* meta_addr = (uint8_t*) (meta_chunk_addr + ((addr & CHUNK_MASK) >> 6));
+  // LIR_Opr meta_chunk_addr = gen->new_pointer_register();
+  // __ move(addr, meta_chunk_addr);
+  // __ logical_and(meta_chunk_addr, LIR_OprFact::longConst(~CHUNK_MASK), meta_chunk_addr);
+  // __ shift_right(meta_chunk_addr, SIDE_METADATA_WORST_CASE_RATIO_LOG, meta_chunk_addr);
+  // __ add(meta_chunk_addr, LIR_OprFact::longConst(SIDE_METADATA_BASE_ADDRESS), meta_chunk_addr);
+  // LIR_Opr offset = gen->new_pointer_register();
+  // __ move(addr, offset);
+  // __ logical_and(offset, LIR_OprFact::longConst(CHUNK_MASK), offset);
+  // __ shift_right(offset, 6, offset);
+  // LIR_Address* meta_addr = new LIR_Address(meta_chunk_addr, offset, T_BYTE);
+  // // intptr_t shift = (addr >> 3) & 0b111;
+  // LIR_Opr shift_long = gen->new_pointer_register();
+  // __ move(addr, shift_long);
+  // __ shift_right(shift_long, 3, shift_long);
+  // __ logical_and(shift_long, LIR_OprFact::longConst(0b111), shift_long);
+  // LIR_Opr shift_int = gen->new_register(T_INT);
+  // __ convert(Bytecodes::_l2i, shift_long, shift_int);
+  // LIR_Opr shift = LIRGenerator::shiftCountOpr();
+  // __ move(shift_int, shift);
+  // // uint8_t byte_val = *meta_addr;
+  // LIR_Opr byte_val = gen->new_register(T_INT);
+  // __ move(meta_addr, byte_val);
+  // // if (((byte_val >> shift) & 1) == 1) slow;
+  // LIR_Opr result = byte_val;
+  // __ shift_right(result, shift, result, LIR_OprFact::illegalOpr);
+  // __ logical_and(result, LIR_OprFact::intConst(1), result);
+  // __ cmp(lir_cond_equal, result, LIR_OprFact::intConst(1));
+  // __ branch(lir_cond_equal, LP64_ONLY(T_LONG) NOT_LP64(T_INT), slow);
+
+  LIR_Address* meta_addr = new LIR_Address(src, T_BYTE);
   LIR_Opr byte_val = gen->new_register(T_INT);
   __ move(meta_addr, byte_val);
-  // if (((byte_val >> shift) & 1) == 1) slow;
-  LIR_Opr result = byte_val;
-  __ shift_right(result, shift, result, LIR_OprFact::illegalOpr);
-  __ logical_and(result, LIR_OprFact::intConst(1), result);
-  __ cmp(lir_cond_equal, result, LIR_OprFact::intConst(1));
-  __ branch(lir_cond_equal, LP64_ONLY(T_LONG) NOT_LP64(T_INT), slow);
+  __ cmp(lir_cond_notEqual, byte_val, LIR_OprFact::intConst(1));
+  __ branch(lir_cond_notEqual, LP64_ONLY(T_LONG) NOT_LP64(T_INT), slow);
+  // __ jump(slow);
+
 #else
   __ jump(slow);
 #endif
@@ -192,26 +241,58 @@ void MMTkObjectBarrierSetC2::record_modified_node(GraphKit* kit, Node* src, Node
   MMTkIdealKit ideal(kit, true);
 
 #if MMTK_ENABLE_OBJECT_BARRIER_FASTPATH
-  Node* no_base = __ top();
-  float unlikely  = PROB_UNLIKELY(0.999);
+  // Node* no_base = __ top();
+  // float unlikely  = PROB_UNLIKELY(0.999);
 
-  Node* zero  = __ ConI(0);
-  Node* addr = __ CastPX(__ ctrl(), src);
-  Node* meta_chunk_addr = __ AddP(no_base, __ ConP(SIDE_METADATA_BASE_ADDRESS),
-    __ URShiftX(__ AndX(addr, __ ConX(~CHUNK_MASK)), __ ConI(SIDE_METADATA_WORST_CASE_RATIO_LOG))
-  );
-  Node* internal_addr = __ AndX(addr, __ ConX(CHUNK_MASK));
-  Node* second_offset = __ URShiftX(internal_addr, __ ConI(6));
-  Node* meta_addr = __ AddP(no_base, meta_chunk_addr, second_offset);
-  Node* shift = __ URShiftX(addr, __ ConI(3));
-  shift = __ AndI(__ ConvL2I(shift), __ ConI(0b111));
-  Node* byte = __ load(__ ctrl(), meta_addr, TypeInt::INT, T_BYTE, Compile::AliasIdxRaw);
-  Node* result = __ AndI(__ URShiftI(byte, shift), __ ConI(1));
+  // Node* zero  = __ ConI(0);
+  // Node* addr = __ CastPX(__ ctrl(), src);
+  // Node* meta_chunk_addr = __ AddP(no_base, __ ConP(SIDE_METADATA_BASE_ADDRESS),
+  //   __ URShiftX(__ AndX(addr, __ ConX(~CHUNK_MASK)), __ ConI(SIDE_METADATA_WORST_CASE_RATIO_LOG))
+  // );
+  // Node* internal_addr = __ AndX(addr, __ ConX(CHUNK_MASK));
+  // Node* second_offset = __ URShiftX(internal_addr, __ ConI(6));
+  // Node* meta_addr = __ AddP(no_base, meta_chunk_addr, second_offset);
+  // Node* shift = __ URShiftX(addr, __ ConI(3));
+  // shift = __ AndI(__ ConvL2I(shift), __ ConI(0b111));
+  // Node* byte = __ load(__ ctrl(), meta_addr, TypeInt::INT, T_BYTE, Compile::AliasIdxRaw);
+  // Node* result = __ AndI(__ URShiftI(byte, shift), __ ConI(1));
 
-  __ if_then(result, BoolTest::ne, zero, unlikely); {
-      const TypeFunc* tf = __ func_type(TypeOopPtr::BOTTOM);
-      Node* x = __ make_leaf_call(tf, CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), "record_modified_node", src);
+  // __ if_then(result, BoolTest::ne, zero, unlikely); {
+  //     const TypeFunc* tf = __ func_type(TypeOopPtr::BOTTOM);
+  //     Node* x = __ make_leaf_call(tf, CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), "record_modified_node", src);
+  // } __ end_if();
+
+  float unlikely  = PROB_UNLIKELY(0.96);
+  Node* const_one  = __ ConI(1);
+  Node* meta_addr = src;
+  // Node* byte = __ load(__ ctrl(), meta_addr, TypeInt::INT, T_BYTE, Compile::AliasIdxRaw);
+  // __ if_then(byte, BoolTest::ne, const_one, unlikely); {
+  //     const TypeFunc* tf = __ func_type(TypeOopPtr::BOTTOM);
+  //     Node* x = __ make_leaf_call(tf, CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), "record_modified_node", src);
+  // } __ end_if();
+
+  Node* log_byte_val = __ load(__ ctrl(), meta_addr, TypeInt::INT, T_BYTE, Compile::AliasIdxRaw);
+  Node* lock_pattern = __ AndI(log_byte_val, __ ConI(0b11));
+  __ if_then(lock_pattern, BoolTest::ne, const_one, PROB_UNLIKELY(0.96)); {
+      Node* header_val = __ load(__ ctrl(), meta_addr, TypeLong::LONG, T_LONG, Compile::AliasIdxRaw);
+      Node* real_addr = __ CastXP(__ AndX(header_val, __ ConX(0xfffffffffffffffc)));  // buggy, should use &~, not Xor
+      Node* real_byte_val = __ load(__ ctrl(), real_addr, TypeInt::INT, T_BYTE, Compile::AliasIdxRaw);
+      __ if_then(real_byte_val, BoolTest::ne, const_one, PROB_UNLIKELY(0.999)); {
+          const TypeFunc* tf = __ func_type(TypeOopPtr::BOTTOM);
+          Node* x = __ make_leaf_call(tf, CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), "record_modified_node", src);
+      } __ end_if();
+  } __ else_(); {
+      __ if_then(log_byte_val, BoolTest::ne, const_one, PROB_UNLIKELY(0.999)); {
+          const TypeFunc* tf = __ func_type(TypeOopPtr::BOTTOM);
+          Node* x = __ make_leaf_call(tf, CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), "record_modified_node", src);
+      } __ end_if();
   } __ end_if();
+
+
+
+  // const TypeFunc* tf = __ func_type(TypeOopPtr::BOTTOM);
+  // Node* x = __ make_leaf_call(tf, CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), "record_modified_node", src);
+
 #else
   const TypeFunc* tf = __ func_type(TypeOopPtr::BOTTOM);
   Node* x = __ make_leaf_call(tf, CAST_FROM_FN_PTR(address, MMTkObjectBarrierSetRuntime::record_modified_node_slow), "record_modified_node", src);
