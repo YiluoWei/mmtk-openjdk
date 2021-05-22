@@ -97,7 +97,7 @@ void MMTkBarrierSetAssembler::eden_allocate(MacroAssembler* masm, Register threa
     __ shrptr(tmp4, 3);
     __ andptr(tmp4, 7);
     __ movptr(tmp3, 1);
-    __ shlptr(tmp3, 1);  // FIXME: should do shlptr(tmp3, tmp4)
+    __ shlptr(tmp3, 1);  
     // // tmp2 = tmp2 | tmp3
     __ orptr(tmp2, tmp3);
 
